@@ -1,51 +1,267 @@
-body {
-  margin: 0;
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  height: 100vh;
-  background: radial-gradient(circle at center, #0d1b2a, #000);
-  font-family: 'Poppins', sans-serif;
-  color: #fff;
-  text-align: center;
+// DOM Elements
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+const scoreDisplay = document.getElementById('score');
+const timerDisplay = document.getElementById('timer');
+const catcherContainer = document.getElementById('catcher-container');
+const startScreen = document.getElementById('startScreen');
+const fortuneScreen = document.getElementById('fortuneScreen');
+const gameUI = document.getElementById('gameUI');
+const finalScoreDisplay = document.getElementById('finalScore');
+const fortuneResult = document.getElementById('fortuneResult');
+const catchSummary = document.getElementById('catchSummary');
+
+// Game State
+let score = 0;
+let celestialObjects = [];
+let particles = [];
+let collectedFortunes = [];
+let collectedCounts = {};
+let gameIntervals = [];
+
+// Sound Effects
+const synth = new Tone.Synth().toDestination();
+const synthHit = new Tone.Synth({ oscillator: { type: 'square' }, envelope: { attack: 0.01, decay: 0.2, sustain: 0, release: 0.1 } }).toDestination();
+const synthGalaxy = new Tone.AMSynth().toDestination();
+
+const fortunes = [
+    { type: "Star", message: "You will have a great idea today. ✨" }, { type: "Star", message: "Trust your gut feeling." }, { type: "Comet", message: "You will go on a trip soon. ☄️" }, { type: "Comet", message: "Get ready for a busy week." }, { type: "Galaxy", message: "You caught a galaxy! Big things are coming. 🌌" }, { type: "Galaxy", message: "Dream big. Anything is possible." }, { type: "Golden Star", message: "Wow, a golden star! You are very lucky! 🌟"}, { type: "Golden Star", message: "A great chance is coming your way!"}, { type: "Asteroid", message: "Ouch, an asteroid! A small problem is ahead. 🪨"}, { type: "Asteroid", message: "A challenge will make you stronger."}, { type: "Planet", message: "A planet suggests you stay calm and steady."}
+];
+
+const planets = [
+    { name: "Mercury", color: "#E5E5E5", points: 30 }, { name: "Venus", color: "#F8C471", points: 35 }, { name: "Earth", color: "#6495ED", points: 50 }, { name: "Mars", color: "#E74C3C", points: 40 }, { name: "Jupiter", color: "#D2B48C", points: 70 }, { name: "Saturn", color: "#F1E5AC", points: 75 }, { name: "Uranus", color: "#AFEEEE", points: 65 }, { name: "Neptune", color: "#5DADE2", points: 60 }, { name: "Pluto", color: "#A9A9A9", points: 25 },
+];
+
+const fortuneCooldowns = new Map();
+const FIFTEEN_MINUTES = 15 * 60 * 1000;
+
+function getFortune(objectType) {
+    const typeKey = planets.some(p => p.name === objectType) ? "Planet" : objectType;
+    const allFortunesForType = fortunes.filter(f => f.type === typeKey);
+    const now = Date.now();
+    const availableFortunes = allFortunesForType.filter(f => !fortuneCooldowns.has(f.message) || (now - fortuneCooldowns.get(f.message) > FIFTEEN_MINUTES));
+    let chosenFortune = availableFortunes.length > 0 ? availableFortunes[Math.floor(Math.random() * availableFortunes.length)] : allFortunesForType[Math.floor(Math.random() * allFortunesForType.length)];
+    fortuneCooldowns.set(chosenFortune.message, now);
+    return chosenFortune;
 }
 
-.game-container {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
+async function generateFinalFortune(counts) {
+    if (Object.keys(counts).length === 0) {
+        return "<p>You caught nothing, but the universe still awaits your next move!</p><p class='mt-2 text-sm text-gray-400'>Funny line? More like a flat line.</p>";
+    }
+    // --- MODIFIED: More direct system prompt ---
+    const systemPrompt = "You are a friendly fortune teller. You will be given a JSON object showing celestial items a user caught. Based on the items, generate a simple, one-sentence fortune. Do not mention the items they caught. On a new line, add a funny one-liner related to their collection.";
+    const userQuery = `Generate a fortune based on this collection: ${JSON.stringify(counts)}`;
+    const apiKey = "AIzaSyCPJhfpdyvO4_uZyvqdjBB9EUFoZOCzb9M"; 
+    const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key=${apiKey}`;
+
+    try {
+        const response = await fetch(apiUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ contents: [{ parts: [{ text: userQuery }] }], systemInstruction: { parts: [{ text: systemPrompt }] } })
+        });
+        if (!response.ok) throw new Error(`API call failed`);
+        const result = await response.json();
+        const text = result.candidates?.[0]?.content?.parts?.[0]?.text || "The stars are cloudy right now...";
+        const parts = text.split('\n');
+        return `<p>${parts[0]}</p>${parts[1] ? `<p class='mt-2 text-sm text-gray-400'>${parts[1]}</p>` : ''}`;
+    } catch (error) {
+        console.warn("API call failed, using local fallback fortune generator.", error);
+        // --- MODIFIED: Fallback fortune is now more generic ---
+        const fallbackFortunes = [ "Your future looks bright and full of adventure.", "Good things are coming your way very soon.", "Prepare for a week of excitement and new opportunities.", "Your cosmic path is leading you towards success." ];
+        const mostCaught = Object.keys(counts).reduce((a, b) => counts[a] > counts[b] ? a : b);
+        let fortune = fallbackFortunes[Math.floor(Math.random() * fallbackFortunes.length)];
+        let funnyLine = `You're a natural at this! You caught ${counts[mostCaught]} of them!`;
+        return `<p>${fortune}</p><p class='mt-2 text-sm text-gray-400'>${funnyLine}</p>`;
+    }
 }
 
-canvas {
-  border: 2px solid white;
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.05);
+// --- Game Flow ---
+function setupGame() {
+    startScreen.classList.remove('hidden');
+    fortuneScreen.classList.add('hidden');
+    gameUI.classList.add('hidden');
+    catcherContainer.classList.add('hidden');
+    clearGameState();
 }
 
-button {
-  margin-top: 20px;
-  padding: 12px 24px;
-  border: none;
-  background: linear-gradient(135deg, #ff7eb3, #ff758c);
-  color: white;
-  font-size: 16px;
-  border-radius: 10px;
-  cursor: pointer;
-  transition: transform 0.2s ease;
+function startGame(duration) {
+    startScreen.classList.add('hidden');
+    gameUI.classList.remove('hidden');
+    catcherContainer.classList.remove('hidden');
+    let timeLeft = duration;
+    timerDisplay.textContent = timeLeft;
+    const timerId = setInterval(() => { timeLeft--; timerDisplay.textContent = timeLeft; if (timeLeft <= 0) endGame(); }, 1000);
+    gameIntervals.push(timerId);
+    const spawnerId = setInterval(createObject, 400);
+    gameIntervals.push(spawnerId);
+    animate();
 }
 
-button:hover {
-  transform: scale(1.05);
+async function endGame() {
+    gameIntervals.forEach(clearInterval);
+    if (animationFrameId) { cancelAnimationFrame(animationFrameId); animationFrameId = null; }
+    gameUI.classList.add('hidden');
+    catcherContainer.classList.add('hidden');
+    fortuneScreen.classList.remove('hidden');
+    finalScoreDisplay.textContent = score;
+    displayCatchSummary();
+    const finalFortune = await generateFinalFortune(collectedCounts);
+    fortuneResult.innerHTML = finalFortune;
 }
 
-#fortuneBox {
-  margin-top: 20px;
-  padding: 15px;
-  background: rgba(255, 255, 255, 0.1);
-  border: 1px solid white;
-  border-radius: 8px;
-  max-width: 300px;
+function clearGameState() {
+    score = 0;
+    scoreDisplay.textContent = '0';
+    celestialObjects = [];
+    particles = [];
+    collectedFortunes = [];
+    collectedCounts = {};
+    gameIntervals.forEach(clearInterval);
+    gameIntervals = [];
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    fortuneResult.innerHTML = `<div class="spinner"></div><p class="ml-4">Consulting the stars...</p>`;
+    catchSummary.innerHTML = '';
 }
-.hidden {
-  display: none;
+
+function displayCatchSummary() {
+    if (Object.keys(collectedCounts).length === 0) {
+        catchSummary.innerHTML = "You were a pacifist in this cosmic journey.";
+        return;
+    }
+    const summaryHtml = Object.entries(collectedCounts)
+        .map(([key, value]) => `<span class="inline-block mx-2">${key}: <strong>${value}</strong></span>`)
+        .join('');
+    catchSummary.innerHTML = summaryHtml;
 }
+
+// Event Listeners
+document.querySelectorAll('.time-btn').forEach(button => { button.addEventListener('click', () => { const time = parseInt(button.dataset.time, 10); startGame(time); }); });
+document.getElementById('playAgainBtn').addEventListener('click', setupGame);
+
+// --- Drawing & Animation ---
+function resizeCanvas() { canvas.width = window.innerWidth; canvas.height = window.innerHeight; }
+window.addEventListener('resize', resizeCanvas);
+resizeCanvas();
+
+class Particle { constructor(x, y, color, life = 1) { this.x = x; this.y = y; this.color = color; this.radius = Math.random() * 2 + 1; this.velocity = { x: (Math.random() - 0.5) * 5, y: (Math.random() - 0.5) * 5 }; this.alpha = life; this.life = life; } draw() { ctx.save(); ctx.globalAlpha = this.alpha; ctx.beginPath(); ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2); ctx.fillStyle = this.color; ctx.fill(); ctx.restore(); } update() { this.x += this.velocity.x; this.y += this.velocity.y; this.alpha -= 0.02 / this.life; this.draw(); } }
+class CelestialObject { constructor(x, y, radius, speed) { this.x = x; this.y = y; this.radius = radius; this.speed = speed; } update() { this.y += this.speed; this.draw(); } }
+class Star extends CelestialObject { constructor(x, y, radius, speed, color, isSpecial = false) { super(x, y, radius, speed); this.color = color; this.isSpecial = isSpecial; this.type = isSpecial ? "Golden Star" : "Star"; } draw() { ctx.beginPath(); ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2); ctx.fillStyle = this.color; ctx.shadowBlur = this.isSpecial ? 30 : 20; ctx.shadowColor = this.color; ctx.fill(); ctx.shadowBlur = 0; } }
+class Asteroid extends CelestialObject { constructor(x, y, radius, speed) { super(x, y, radius, speed); this.color = '#8B4513'; this.type = "Asteroid"; } draw() { ctx.beginPath(); ctx.moveTo(this.x + this.radius, this.y); for (let i = 1; i <= 6; i++) { const angle = i * (Math.PI / 3); const r = this.radius * (0.8 + Math.random() * 0.4); ctx.lineTo(this.x + r * Math.cos(angle), this.y + r * Math.sin(angle)); } ctx.closePath(); ctx.fillStyle = this.color; ctx.strokeStyle = '#5a2d0c'; ctx.lineWidth = 2; ctx.fill(); ctx.stroke(); } }
+class Comet extends CelestialObject { constructor(x, y, radius, speed) { super(x, y, radius, speed); this.color = '#A7C7E7'; this.type = "Comet"; this.tail = []; } draw() { this.tail.forEach(p => p.draw()); ctx.beginPath(); ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2); ctx.fillStyle = this.color; ctx.shadowBlur = 20; ctx.shadowColor = this.color; ctx.fill(); ctx.shadowBlur = 0; } update() { this.tail.push(new Particle(this.x, this.y, this.color, 0.5)); this.tail.forEach((p, index) => { p.alpha -= 0.04; if (p.alpha <= 0) this.tail.splice(index, 1); }); this.y += this.speed; this.draw(); } }
+class Galaxy extends CelestialObject { constructor(x, y, radius, speed) { super(x, y, radius, speed); this.color = '#c4b5fd'; this.type = "Galaxy"; this.angle = 0; } draw() { ctx.save(); ctx.translate(this.x, this.y); ctx.rotate(this.angle); for (let i = 0; i < 100; i++) { const angle = i * 0.1; const dist = i * 0.2; const x = Math.cos(angle) * dist; const y = Math.sin(angle) * dist; const r = 1 - (dist / this.radius); ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fillStyle = `rgba(196, 181, 253, ${0.5 * r})`; ctx.fill(); } ctx.restore(); } update() { this.angle += 0.02; this.y += this.speed; this.draw(); } }
+class Planet extends CelestialObject {
+    constructor(x, y, radius, speed, planetData) {
+        super(x, y, radius, speed);
+        this.planetData = planetData;
+        this.type = planetData.name;
+    }
+    draw() {
+        ctx.beginPath();
+        ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+        ctx.fillStyle = this.planetData.color;
+        ctx.shadowBlur = 15;
+        ctx.shadowColor = this.planetData.color;
+        ctx.fill();
+        ctx.shadowBlur = 0;
+        if (this.planetData.name === "Saturn") {
+            ctx.beginPath();
+            ctx.ellipse(this.x, this.y, this.radius * 1.8, this.radius * 0.5, Math.PI / 8, 0, 2 * Math.PI);
+            ctx.strokeStyle = 'rgba(241, 229, 172, 0.7)';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+        }
+    }
+}
+
+function createObject() {
+    const rand = Math.random(); const x = Math.random() * canvas.width; const y = -40;
+    if (rand < 0.02) { celestialObjects.push(new Galaxy(x, y, 20, 0.5)); } 
+    else if (rand < 0.08) { 
+        const planetData = planets[Math.floor(Math.random() * planets.length)];
+        celestialObjects.push(new Planet(x, y, 15, 1.2, planetData));
+    }
+    else if (rand < 0.18) { celestialObjects.push(new Comet(x, y, 5, 2.5)); } 
+    else if (rand < 0.33) { celestialObjects.push(new Asteroid(x, y, Math.random() * 10 + 10, Math.random() * 1.5 + 1)); } 
+    else { const isSpecial = Math.random() < 0.05; const radius = isSpecial ? 10 : Math.random() * 5 + 3; const speed = isSpecial ? 2 : Math.random() * 1 + 0.5; const color = isSpecial ? '#FFD700' : ['#FFFFFF', '#FFDDC1', '#A7C7E7', '#FDFD96'][Math.floor(Math.random() * 4)]; celestialObjects.push(new Star(x, y, radius, speed, color, isSpecial)); }
+}
+
+let animationFrameId;
+function animate() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    celestialObjects.forEach((obj, index) => { obj.update(); if (obj.y - obj.radius > canvas.height) celestialObjects.splice(index, 1); });
+    particles.forEach((p, index) => { if (p.alpha <= 0) particles.splice(index, 1); else p.update(); });
+    animationFrameId = requestAnimationFrame(animate);
+}
+
+window.addEventListener('mousemove', (event) => {
+    const catcherWidth = catcherContainer.offsetWidth; let newX = event.clientX - catcherWidth / 2;
+    if (newX < 0) newX = 0; if (newX > window.innerWidth - catcherWidth) newX = window.innerWidth - catcherWidth;
+    catcherContainer.style.left = newX + 'px';
+});
+
+canvas.addEventListener('click', () => {
+    if (Tone.context.state !== 'running') Tone.context.resume();
+    catcherContainer.classList.add('catcher-active');
+    setTimeout(() => catcherContainer.classList.remove('catcher-active'), 400);
+
+    const catcherRect = catcherContainer.getBoundingClientRect();
+    const catchZone = { x: catcherRect.left, width: catcherRect.width, y: catcherRect.top, height: catcherRect.height };
+    let potentialCatches = [];
+    for (let i = celestialObjects.length - 1; i >= 0; i--) { const obj = celestialObjects[i]; if (obj.x > catchZone.x && obj.x < catchZone.x + catchZone.width && obj.y > catchZone.y && obj.y < catchZone.y + catchZone.height) { potentialCatches.push({ obj, index: i }); } }
+    if (potentialCatches.length > 0) {
+        potentialCatches.sort((a, b) => b.obj.y - a.obj.y);
+        const caught = potentialCatches[0]; let points = 0;
+        
+        const isPlanet = planets.some(p => p.name === caught.obj.type);
+        if (isPlanet) {
+            points = caught.obj.planetData.points;
+            synth.triggerAttackRelease("A4", "8n");
+        } else {
+            switch(caught.obj.type) {
+                case "Asteroid": points = -25; synthHit.triggerAttackRelease("C3", "8n"); break;
+                case "Golden Star": points = 50; synth.triggerAttackRelease("G5", "8n"); break;
+                case "Comet": points = 20; synth.triggerAttackRelease("E5", "8n"); break;
+                case "Galaxy": points = 100; synthGalaxy.triggerAttackRelease("C4", "2n"); break;
+                default: points = 10; synth.triggerAttackRelease("C5", "8n");
+            }
+        }
+
+        score += points; scoreDisplay.textContent = score;
+        const fortune = getFortune(caught.obj.type);
+        collectedFortunes.push(fortune.message);
+        collectedCounts[caught.obj.type] = (collectedCounts[caught.obj.type] || 0) + 1;
+        
+        showFloatingFortune(caught.obj, fortune.message);
+
+        if (caught.obj.type !== "Asteroid") { for (let i = 0; i < 15; i++) { particles.push(new Particle(caught.obj.x, caught.obj.y, caught.obj.color || caught.obj.planetData.color)); } }
+        celestialObjects.splice(caught.index, 1);
+    }
+});
+
+function showFloatingFortune(object, message) {
+    const fortuneEl = document.createElement('div');
+    fortuneEl.classList.add('fortune-text-popup');
+    
+    let color = '#FFFFFF';
+    if (object.type === "Golden Star") color = '#FFD700';
+    else if (object.type === "Asteroid") color = '#f87171';
+    else if (object.type === "Galaxy") color = '#c4b5fd';
+    else if (object.type === "Comet") color = '#A7C7E7';
+    else if (object.planetData) color = object.planetData.color;
+
+    fortuneEl.style.color = color;
+    fortuneEl.style.left = `${object.x}px`;
+    fortuneEl.style.top = `${object.y}px`;
+    fortuneEl.textContent = message;
+
+    document.body.appendChild(fortuneEl);
+
+    setTimeout(() => {
+        fortuneEl.remove();
+    }, 3000);
+}
+
+// Initial setup
+setupGame();
