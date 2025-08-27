@@ -23,12 +23,7 @@ A cosmic-themed web game where you dodge asteroids and catch stars, planets, com
 - **HTML5 Canvas** – Game rendering  
 - **TailwindCSS** – Styling  
 - **Tone.js** – Sound effects  
-- **Google Gemini API (optional)** – Fortune text generation (with fallback)  
+- **Google Gemini API ** – Fortune text generation (with fallback)  
 
 ---
 
-## 🚀 Run Locally
-1. Clone this repo:
-   ```bash
-   git clone https://github.com/<your-username>/Starry-Fortune-Game.git
-   cd Starry-Fortune-Game
